@@ -6,12 +6,20 @@ import os
 import time
 import subprocess
 import sys
+import threading
 from urllib.parse import quote
 from pypresence import Presence, exceptions
+
+try:
+    import rumps
+    HAS_RUMPS = True
+except ImportError:
+    HAS_RUMPS = False
 
 CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 
 IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))
+
 
 def get_apple_music_info():
     script = '''
@@ -48,15 +56,240 @@ def get_apple_music_info():
                     'position': float(parts[5]) if len(parts) > 5 and parts[5] else 0
                 }
     except subprocess.TimeoutExpired:
-        print("AppleScript timed out")
-    except Exception as e:
-        print(f"Error getting Apple Music info: {e}")
+        pass
+    except Exception:
+        pass
     return None
+
 
 def connect_rpc():
     RPC = Presence(CLIENT_ID)
     RPC.connect()
     return RPC
+
+
+class JsonParasite:
+    """Core polling logic, UI-agnostic."""
+
+    def __init__(self):
+        self.RPC = None
+        self.last_track = None
+        self.last_info = None
+        self.last_position = 0
+        self.session_start = None
+        self.was_playing = False
+        self.paused_at = None
+        self.status = "Idle"
+        self.track_display = ""
+        self.running = True
+        self.hidden = False
+
+    def hide(self):
+        self.hidden = True
+        try:
+            if self.RPC:
+                self.RPC.clear()
+                self.RPC.close()
+        except Exception:
+            pass
+        self.RPC = None
+        self.status = "Hidden"
+
+    def unhide(self):
+        self.hidden = False
+        self.was_playing = False
+        self.status = "Resuming..."
+
+    def tick(self):
+        if self.hidden:
+            return
+
+        if self.RPC is None:
+            try:
+                self.RPC = connect_rpc()
+                self.status = "Connected"
+            except Exception:
+                self.status = "Waiting for Discord..."
+                return
+
+        try:
+            track = get_apple_music_info()
+
+            if track and track['is_playing']:
+                current_key = f"{track['name']}|{track['artist']}"
+
+                if not self.was_playing:
+                    if self.session_start is None:
+                        self.session_start = time.time()
+                    self.paused_at = None
+
+                if self.last_track != current_key or not self.was_playing:
+                    self.last_track = current_key
+                    self.last_info = track
+                    self.was_playing = True
+
+                pos = int(track['position'])
+                dur = int(track['duration'])
+                self.last_position = pos
+                progress = f"{pos // 60}:{pos % 60:02d} / {dur // 60}:{dur % 60:02d}"
+
+                album = track['album']
+                hover = f"{track['name']} - {album}" if album else track['name']
+                search_url = f"https://music.apple.com/search?term={quote(track['name'] + ' ' + track['artist'])}"
+
+                self.RPC.update(
+                    details=track['name'][:128],
+                    state=f"by {track['artist'][:120]} · {progress}",
+                    large_image="apple_music",
+                    large_text=hover[:128],
+                    small_image="playing",
+                    small_text="Playing",
+                    start=self.session_start,
+                    buttons=[{"label": "Search on Apple Music", "url": search_url}],
+                )
+
+                self.status = "Sharing"
+                self.track_display = f"{track['name']} - {track['artist']}"
+
+            else:
+                if self.was_playing:
+                    self.was_playing = False
+                    self.paused_at = time.time()
+
+                if self.paused_at and time.time() - self.paused_at >= IDLE_TIMEOUT:
+                    self.RPC.clear()
+                    self.last_track = None
+                    self.last_info = None
+                    self.session_start = None
+                    self.paused_at = None
+                    self.status = "Idle"
+                    self.track_display = ""
+                elif self.last_info:
+                    pos = self.last_position
+                    dur = int(self.last_info['duration'])
+                    progress = f"{pos // 60}:{pos % 60:02d} / {dur // 60}:{dur % 60:02d}"
+
+                    self.RPC.update(
+                        details=self.last_info['name'][:128],
+                        state=f"by {self.last_info['artist'][:120]} · {progress}",
+                        large_image="apple_music",
+                        large_text=f"{self.last_info['name']} - {self.last_info['album']}"[:128] if self.last_info['album'] else self.last_info['name'][:128],
+                        small_image="paused",
+                        small_text="Paused",
+                        start=self.session_start,
+                    )
+                    self.status = "Paused"
+
+        except (exceptions.DiscordNotFound, exceptions.InvalidPipe,
+                exceptions.PipeClosed, BrokenPipeError,
+                ConnectionResetError, OSError):
+            try:
+                self.RPC.close()
+            except Exception:
+                pass
+            self.RPC = None
+            self.was_playing = False
+            self.status = "Reconnecting..."
+        except exceptions.InvalidID:
+            self.status = "Invalid Client ID"
+            self.running = False
+        except Exception as e:
+            self.status = f"Error: {e}"
+
+    def cleanup(self):
+        try:
+            if self.RPC:
+                self.RPC.clear()
+                self.RPC.close()
+        except Exception:
+            pass
+
+
+def run_headless(parasite):
+    """Terminal-only mode (no menu bar icon)."""
+    print("🎵 Apple Music Discord Rich Presence")
+    print("=" * 40)
+    print("⏳ Monitoring... (Ctrl+C to stop)")
+    print()
+
+    try:
+        while parasite.running:
+            parasite.tick()
+            prev = parasite.status
+            if parasite.status != prev or parasite.status == "Playing":
+                print(f"[{parasite.status}] {parasite.track_display}")
+            time.sleep(5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        parasite.cleanup()
+        print("\n👋 Goodbye!")
+
+
+def run_menubar(parasite):
+    """Menu bar mode using rumps."""
+
+    class MusicRPCApp(rumps.App):
+        def __init__(self):
+            super().__init__("🎵", quit_button=None)
+            self.menu = [
+                rumps.MenuItem("Apple Music Discord RPC", callback=None),
+                None,
+                rumps.MenuItem("Status: Starting...", callback=None),
+                rumps.MenuItem("Track: —", callback=None),
+                None,
+                rumps.MenuItem("Hide Status", callback=self.toggle_visibility),
+                None,
+                rumps.MenuItem("Quit", callback=self.quit_app),
+            ]
+            self.status_item = self.menu["Status: Starting..."]
+            self.track_item = self.menu["Track: —"]
+            self.visibility_item = self.menu["Hide Status"]
+
+        @rumps.timer(5)
+        def poll(self, _):
+            parasite.tick()
+
+            state = parasite.status
+            self.status_item.title = f"Status: {state}"
+
+            if parasite.track_display:
+                self.track_item.title = parasite.track_display[:60]
+            else:
+                self.track_item.title = "Track: —"
+
+            if parasite.hidden:
+                self.title = "🙈"
+            elif state == "Sharing":
+                self.title = "🎵"
+            elif state == "Paused":
+                self.title = "⏸"
+            elif state == "Idle":
+                self.title = "🎵"
+            else:
+                self.title = "⚠️"
+
+        def toggle_visibility(self, sender):
+            if parasite.hidden:
+                parasite.unhide()
+                sender.title = "Hide Status"
+            else:
+                parasite.hide()
+                sender.title = "Share Status"
+
+        def quit_app(self, _):
+            parasite.running = False
+            parasite.cleanup()
+            rumps.quit_application()
+
+    try:
+        from AppKit import NSApplication
+        NSApplication.sharedApplication().setActivationPolicy_(1)
+    except ImportError:
+        pass
+
+    MusicRPCApp().run()
+
 
 def main():
     if not CLIENT_ID:
@@ -64,130 +297,13 @@ def main():
         print("   Create an app at https://discord.com/developers/applications")
         sys.exit(1)
 
-    print("🎵 Apple Music Discord Rich Presence")
-    print("=" * 40)
-    print("⏳ Monitoring Apple Music... (Press Ctrl+C to stop)")
-    print()
+    parasite = JsonParasite()
 
-    RPC = None
-    last_track = None
-    last_info = None
-    last_position = 0
-    session_start = None
-    was_playing = False
-    paused_at = None
+    if HAS_RUMPS and "--no-gui" not in sys.argv:
+        run_menubar(parasite)
+    else:
+        run_headless(parasite)
 
-    try:
-        while True:
-            if RPC is None:
-                try:
-                    RPC = connect_rpc()
-                    print("✅ Connected to Discord RPC")
-                except Exception:
-                    time.sleep(10)
-                    continue
-
-            try:
-                track = get_apple_music_info()
-
-                if track and track['is_playing']:
-                    current_key = f"{track['name']}|{track['artist']}"
-
-                    if not was_playing:
-                        if session_start is None:
-                            session_start = time.time()
-                            print("🎧 Session started")
-                        paused_at = None
-
-                    if last_track != current_key or not was_playing:
-                        last_track = current_key
-                        last_info = track
-                        was_playing = True
-
-                        print(f"▶️  Now Playing: {track['name']} - {track['artist']}")
-                        print(f"   Album: {track['album']}")
-                        print(f"   Progress: {int(track['position'])//60}:{int(track['position'])%60:02d} / {int(track['duration'])//60}:{int(track['duration'])%60:02d}")
-                        print()
-
-                    pos = int(track['position'])
-                    dur = int(track['duration'])
-                    last_position = pos
-                    progress = f"{pos//60}:{pos%60:02d} / {dur//60}:{dur%60:02d}"
-
-                    album = track['album']
-                    hover = f"{track['name']} - {album}" if album else track['name']
-
-                    search_url = f"https://music.apple.com/search?term={quote(track['name'] + ' ' + track['artist'])}"
-
-                    RPC.update(
-                        details=track['name'][:128],
-                        state=f"by {track['artist'][:120]} · {progress}",
-                        large_image="apple_music",
-                        large_text=hover[:128],
-                        small_image="playing",
-                        small_text="Playing",
-                        start=session_start,
-                        buttons=[{"label": "Search on Apple Music", "url": search_url}],
-                    )
-
-                else:
-                    if was_playing:
-                        was_playing = False
-                        paused_at = time.time()
-                        print("⏸️  Paused")
-                        print()
-
-                    if paused_at and time.time() - paused_at >= IDLE_TIMEOUT:
-                        RPC.clear()
-                        last_track = None
-                        last_info = None
-                        session_start = None
-                        paused_at = None
-                        print("💤 Idle for 5min — cleared status")
-                        print()
-                    elif last_info:
-                        pos = last_position
-                        dur = int(last_info['duration'])
-                        progress = f"{pos//60}:{pos%60:02d} / {dur//60}:{dur%60:02d}"
-
-                        RPC.update(
-                            details=last_info['name'][:128],
-                            state=f"by {last_info['artist'][:120]} · {progress}",
-                            large_image="apple_music",
-                            large_text=f"{last_info['name']} - {last_info['album']}"[:128] if last_info['album'] else last_info['name'][:128],
-                            small_image="paused",
-                            small_text="Paused",
-                            start=session_start,
-                        )
-
-            except (exceptions.DiscordNotFound, exceptions.InvalidPipe,
-                    exceptions.PipeClosed, BrokenPipeError,
-                    ConnectionResetError, OSError):
-                print("❌ Discord disconnected. Reconnecting...")
-                try:
-                    RPC.close()
-                except Exception:
-                    pass
-                RPC = None
-                was_playing = False
-                continue
-            except exceptions.InvalidID:
-                print("❌ Invalid Client ID.")
-                break
-            except Exception as e:
-                print(f"⚠️  Error: {e}")
-
-            time.sleep(5)
-
-    except KeyboardInterrupt:
-        print("\n🛑 Stopping...")
-        try:
-            if RPC:
-                RPC.clear()
-                RPC.close()
-        except Exception:
-            pass
-        print("👋 Goodbye!")
 
 if __name__ == "__main__":
     main()
