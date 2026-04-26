@@ -2,7 +2,7 @@
 
 Show what you're listening to on Apple Music as your Discord status — macOS only.
 
-![screenshot](screenshot.png)
+<img width="491" height="195" alt="image" src="https://github.com/user-attachments/assets/bf82abd7-2546-4d34-9a55-9a38ffc545f7" />
 
 ## Features
 
