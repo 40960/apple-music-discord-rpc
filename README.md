@@ -41,6 +41,7 @@ This will:
 - Start the app immediately
 
 A 🎵 icon will appear in your menu bar.
+<img width="372" height="173" alt="image" src="https://github.com/user-attachments/assets/0bd6b715-93b9-46c0-8992-a985e8236737" />
 
 ### Uninstall
 
