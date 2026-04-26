@@ -137,8 +137,10 @@ class JsonParasite:
                 hover = f"{track['name']} - {album}" if album else track['name']
                 search_url = f"https://music.apple.com/search?term={quote(track['name'] + ' ' + track['artist'])}"
 
+                title = f"{track['name']} - {album}" if album else track['name']
+
                 self.RPC.update(
-                    details=track['name'][:128],
+                    details=title[:128],
                     state=f"by {track['artist'][:120]} · {progress}",
                     large_image="apple_music",
                     large_text=hover[:128],
@@ -169,8 +171,10 @@ class JsonParasite:
                     dur = int(self.last_info['duration'])
                     progress = f"{pos // 60}:{pos % 60:02d} / {dur // 60}:{dur % 60:02d}"
 
+                    paused_title = f"{self.last_info['name']} - {self.last_info['album']}" if self.last_info['album'] else self.last_info['name']
+
                     self.RPC.update(
-                        details=self.last_info['name'][:128],
+                        details=paused_title[:128],
                         state=f"by {self.last_info['artist'][:120]} · {progress}",
                         large_image="apple_music",
                         large_text=f"{self.last_info['name']} - {self.last_info['album']}"[:128] if self.last_info['album'] else self.last_info['name'][:128],
