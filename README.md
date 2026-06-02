@@ -64,6 +64,7 @@ Use `--no-gui` for terminal-only mode (no menu bar icon).
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_CLIENT_ID` | Yes | — | Your Discord Application ID |
+| `DISCORD_TARGET` | No | `auto` | Which Discord client to use: `auto`, `stable`, `ptb`, `canary`, or `all` |
 | `IDLE_TIMEOUT` | No | `300` | Seconds before clearing status when paused |
 
 ## Menu Bar
@@ -76,6 +77,11 @@ Use `--no-gui` for terminal-only mode (no menu bar icon).
 | ⚠️ | Error / Reconnecting |
 
 Click the icon to see current track, status, and toggle visibility.
+
+If multiple Discord clients are running, the menu shows target choices for the
+clients it can detect. `Auto` prefers the stable Discord app, then PTB, then
+Canary. `All Running Clients` shares the same activity to every detected
+Discord client.
 
 ## How It Works
 
