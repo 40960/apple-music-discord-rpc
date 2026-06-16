@@ -30,6 +30,11 @@ DISCORD_VARIANTS = {
     "canary": "Discord Canary",
 }
 TARGET_ORDER = ("stable", "ptb", "canary")
+DISCORD_APP_BUNDLES = {
+    "stable": "Discord.app",
+    "ptb": "Discord PTB.app",
+    "canary": "Discord Canary.app",
+}
 
 
 @dataclass(frozen=True)
@@ -49,13 +54,28 @@ def normalize_target(target):
     return "auto"
 
 
+def discord_app_candidates(home=None):
+    home = home or os.path.expanduser("~")
+    roots = ["/Applications", os.path.join(home, "Applications")]
+    roots = list(dict.fromkeys(roots))
+
+    return {
+        variant: [os.path.join(root, bundle) for root in roots]
+        for variant, bundle in DISCORD_APP_BUNDLES.items()
+    }
+
+
 def classify_discord_app(owner_path):
-    if "/Discord PTB.app/" in owner_path:
-        return "ptb"
-    if "/Discord Canary.app/" in owner_path:
-        return "canary"
-    if "/Discord.app/" in owner_path:
-        return "stable"
+    owner_path = (owner_path or "").rstrip("/")
+    for variant, app_paths in discord_app_candidates().items():
+        for app_path in app_paths:
+            if owner_path == app_path or owner_path.startswith(f"{app_path}/"):
+                return variant
+
+    for variant in TARGET_ORDER:
+        bundle = DISCORD_APP_BUNDLES[variant]
+        if owner_path.endswith(f"/{bundle}") or f"/{bundle}/" in owner_path:
+            return variant
     return None
 
 

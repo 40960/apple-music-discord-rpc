@@ -4,6 +4,7 @@ from apple_music_discord import (
     DiscordClient,
     choose_discord_clients,
     classify_discord_app,
+    discord_app_candidates,
     extract_pipe_number,
 )
 
@@ -11,9 +12,24 @@ from apple_music_discord import (
 class DiscordTargetTests(unittest.TestCase):
     def test_classifies_discord_variants_from_owner_paths(self):
         self.assertEqual(classify_discord_app("/Applications/Discord.app/Contents/MacOS/Discord"), "stable")
+        self.assertEqual(classify_discord_app("/Users/nova/Applications/Discord.app/Contents/MacOS/Discord"), "stable")
         self.assertEqual(classify_discord_app("/Applications/Discord PTB.app/Contents/MacOS/Discord PTB"), "ptb")
+        self.assertEqual(classify_discord_app("/Users/nova/Applications/Discord PTB.app/Contents/MacOS/Discord PTB"), "ptb")
         self.assertEqual(classify_discord_app("/Applications/Discord Canary.app/Contents/MacOS/Discord Canary"), "canary")
         self.assertIsNone(classify_discord_app("/Applications/Slack.app/Contents/MacOS/Slack"))
+
+    def test_classifies_discord_variants_from_bundle_root_paths(self):
+        self.assertEqual(classify_discord_app("/Applications/Discord.app"), "stable")
+        self.assertEqual(classify_discord_app("/Users/nova/Applications/Discord PTB.app"), "ptb")
+        self.assertEqual(classify_discord_app("/Users/nova/Applications/Discord Canary.app"), "canary")
+
+    def test_probes_system_and_user_application_directories(self):
+        candidates = discord_app_candidates("/Users/nova")
+
+        self.assertIn("/Applications/Discord.app", candidates["stable"])
+        self.assertIn("/Users/nova/Applications/Discord.app", candidates["stable"])
+        self.assertIn("/Applications/Discord PTB.app", candidates["ptb"])
+        self.assertIn("/Users/nova/Applications/Discord PTB.app", candidates["ptb"])
 
     def test_extracts_pipe_number_from_socket_path(self):
         self.assertEqual(extract_pipe_number("/tmp/discord-ipc-0"), 0)
