@@ -83,6 +83,19 @@ clients it can detect. `Auto` prefers the stable Discord app, then PTB, then
 Canary. `All Running Clients` shares the same activity to every detected
 Discord client.
 
+The app detects Discord by inspecting the running `discord-ipc-*` sockets. It
+supports the normal system Applications folder and the per-user Applications
+folder:
+
+- `/Applications/Discord.app`
+- `~/Applications/Discord.app`
+- `/Applications/Discord PTB.app`
+- `~/Applications/Discord PTB.app`
+- Canary in the same locations
+
+If you move Discord between folders while this app is running, restart this app
+so it can rebuild the detected client list.
+
 ## How It Works
 
 Uses AppleScript to poll Apple Music every 5 seconds, then pushes the track info to Discord via Rich Presence ([pypresence](https://github.com/qwertyquerty/pypresence)). Auto-start is handled by a standard macOS [LaunchAgent](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) plist.
