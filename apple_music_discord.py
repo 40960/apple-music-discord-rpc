@@ -479,12 +479,29 @@ def run_headless(parasite):
         print("\n👋 Goodbye!")
 
 
+def _sf_symbol_image(name):
+    from AppKit import NSImage
+
+    image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    if image is not None:
+        image.setTemplate_(True)
+    return image
+
+
 def run_menubar(parasite):
     """Menu bar mode using rumps."""
 
+    icons = {
+        "playing": _sf_symbol_image("music.note"),
+        "paused": _sf_symbol_image("pause.fill"),
+        "hidden": _sf_symbol_image("eye.slash.fill"),
+        "warning": _sf_symbol_image("exclamationmark.triangle.fill"),
+    }
+
     class MusicRPCApp(rumps.App):
         def __init__(self):
-            super().__init__("🎵", quit_button=None)
+            super().__init__("Apple Music Discord RPC", quit_button=None)
+            self.set_status_icon("playing")
             self.menu = [
                 rumps.MenuItem("Apple Music Discord RPC", callback=None),
                 None,
@@ -514,6 +531,14 @@ def run_menubar(parasite):
             self.visibility_item = self.menu["Hide Status"]
             self.refresh_target_menu()
 
+        def set_status_icon(self, key):
+            self.title = None
+            self._icon_nsimage = icons[key]
+            try:
+                self._nsapp.setStatusBarIcon()
+            except AttributeError:
+                pass
+
         @rumps.timer(5)
         def poll(self, _):
             self.refresh_target_menu()
@@ -528,15 +553,15 @@ def run_menubar(parasite):
                 self.track_item.title = "Track: —"
 
             if parasite.hidden:
-                self.title = "🙈"
+                self.set_status_icon("hidden")
             elif state.startswith("Sharing"):
-                self.title = "🎵"
+                self.set_status_icon("playing")
             elif state.startswith("Paused"):
-                self.title = "⏸"
+                self.set_status_icon("paused")
             elif state == "Idle":
-                self.title = "🎵"
+                self.set_status_icon("playing")
             else:
-                self.title = "⚠️"
+                self.set_status_icon("warning")
 
         def refresh_target_menu(self):
             clients = parasite.refresh_discord_clients()
