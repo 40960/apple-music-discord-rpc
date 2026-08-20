@@ -85,7 +85,19 @@ EOF
 
 plutil -lint "$PLIST_PATH" >/dev/null
 
-launchctl bootstrap "gui/$UID" "$PLIST_PATH"
+# launchd can still hold the just-booted-out service for a moment and answers
+# with EIO, so retry rather than failing the install on a race.
+for attempt in 1 2 3 4 5; do
+    if launchctl bootstrap "gui/$UID" "$PLIST_PATH" 2>/dev/null; then
+        break
+    fi
+    if [ "$attempt" -eq 5 ]; then
+        echo "❌ launchctl bootstrap failed:"
+        launchctl bootstrap "gui/$UID" "$PLIST_PATH"
+        exit 1
+    fi
+    sleep 1
+done
 
 echo ""
 echo "✅ Installed and started!"
