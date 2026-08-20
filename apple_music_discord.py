@@ -2,6 +2,9 @@
 """
 Apple Music Discord Rich Presence for macOS
 """
+import ctypes
+import ctypes.util
+import errno
 import os
 import re
 import time
@@ -35,6 +38,55 @@ DISCORD_APP_BUNDLES = {
     "ptb": "Discord PTB.app",
     "canary": "Discord Canary.app",
 }
+
+
+def log(message):
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", file=sys.stderr, flush=True)
+
+
+_LIBC = None
+
+
+def _proc_pidpath(pid):
+    """Resolve a pid's executable path via libproc, the call TCC itself uses.
+
+    Returns (rc, errno, path); rc <= 0 means the lookup failed.
+    """
+    global _LIBC
+    if _LIBC is None:
+        try:
+            _LIBC = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            _LIBC.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        except (OSError, AttributeError):
+            _LIBC = False
+    if _LIBC is False:
+        return 0, 0, None
+
+    buf = ctypes.create_string_buffer(4096)
+    ctypes.set_errno(0)
+    rc = _LIBC.proc_pidpath(pid, buf, len(buf))
+    return rc, ctypes.get_errno(), buf.value.decode(errors="replace") if rc > 0 else None
+
+
+def executable_is_stale(pid=None):
+    """True when the running executable has been deleted from disk.
+
+    Homebrew removes the old Cellar directory when it upgrades python, but the
+    already-running process keeps executing the deleted inode. macOS can then no
+    longer resolve the process path, fails to build a TCC attribution chain, and
+    Music rejects every AppleEvent we send with errAEEventNotPermitted - silently,
+    since osascript just exits non-zero. Only a restart recovers.
+
+    A pid that has exited reports ESRCH rather than ENOENT and is not stale.
+    """
+    rc, err, path = _proc_pidpath(os.getpid() if pid is None else pid)
+    if rc <= 0:
+        return err == errno.ENOENT
+    return not os.path.exists(path)
+
+
+class MusicQueryError(Exception):
+    """Raised when osascript could not be asked about the current track."""
 
 
 @dataclass(frozen=True)
@@ -192,22 +244,42 @@ def get_apple_music_info():
     '''
     try:
         result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            parts = result.stdout.strip().split("|")
-            if len(parts) >= 6:
-                return {
-                    'is_playing': parts[0] == "playing",
-                    'name': parts[1] if len(parts) > 1 else "",
-                    'artist': parts[2] if len(parts) > 2 else "",
-                    'album': parts[3] if len(parts) > 3 else "",
-                    'duration': float(parts[4]) if len(parts) > 4 and parts[4] else 0,
-                    'position': float(parts[5]) if len(parts) > 5 and parts[5] else 0
-                }
     except subprocess.TimeoutExpired:
-        pass
-    except Exception:
-        pass
-    return None
+        raise MusicQueryError("osascript timed out after 5s")
+    except OSError as e:
+        raise MusicQueryError(f"could not run osascript: {e}")
+
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        raise MusicQueryError(detail[-1] if detail else f"osascript exited {result.returncode}")
+
+    return parse_music_payload(result.stdout)
+
+
+def parse_music_payload(stdout):
+    """Parse the pipe-joined osascript reply, or None if it is unusable.
+
+    Duration and position are read from the end so that a pipe character in an
+    album title does not shift the numeric fields.
+    """
+    parts = stdout.strip().split("|")
+    if len(parts) < 6:
+        return None
+
+    try:
+        duration = float(parts[-2]) if parts[-2] else 0
+        position = float(parts[-1]) if parts[-1] else 0
+    except ValueError:
+        return None
+
+    return {
+        'is_playing': parts[0] == "playing",
+        'name': parts[1],
+        'artist': parts[2],
+        'album': "|".join(parts[3:-2]),
+        'duration': duration,
+        'position': position,
+    }
 
 
 class DiscordRPCGroup:
@@ -303,6 +375,7 @@ class JsonParasite:
         self.track_display = ""
         self.running = True
         self.hidden = False
+        self.last_logged_error = None
 
     def refresh_discord_clients(self):
         self.running_clients = discover_discord_clients()
@@ -348,6 +421,10 @@ class JsonParasite:
         self.status = "Resuming..."
 
     def tick(self):
+        if executable_is_stale():
+            self.restart_for_stale_executable()
+            return
+
         if self.hidden:
             return
 
@@ -443,11 +520,32 @@ class JsonParasite:
             self.connected_label = ""
             self.was_playing = False
             self.status = "Reconnecting..."
+        except MusicQueryError as e:
+            self.status = f"Music unavailable: {e}"
+            self.log_once(f"Apple Music query failed: {e}")
         except exceptions.InvalidID:
             self.status = "Invalid Client ID"
             self.running = False
         except Exception as e:
             self.status = f"Error: {e}"
+
+    def log_once(self, message):
+        """Log a recurring failure only when it changes, not every 5s tick."""
+        if message != self.last_logged_error:
+            self.last_logged_error = message
+            log(message)
+
+    def restart_for_stale_executable(self):
+        """Exit non-zero so the LaunchAgent's KeepAlive respawns us.
+
+        The replacement process runs the current binary, so the condition that
+        triggered this cannot repeat immediately - there is no restart loop.
+        """
+        self.status = "Restarting..."
+        log("executable was replaced on disk (likely a Homebrew python upgrade); "
+            "AppleEvents to Music are being denied - exiting so launchd respawns us")
+        self.cleanup()
+        os._exit(1)
 
     def cleanup(self):
         try:
