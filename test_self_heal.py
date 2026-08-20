@@ -103,6 +103,71 @@ class StaleExecutableGuardTests(unittest.TestCase):
         self.assertEqual(self.parasite.status, "Waiting for Discord...")
 
 
+class StatusFreshnessTests(unittest.TestCase):
+    """A stale status must never outlive the condition that produced it."""
+
+    def setUp(self):
+        self.parasite = apple_music_discord.JsonParasite()
+        self.parasite.RPC = mock.MagicMock()
+        self.parasite.connected_label = "Discord"
+
+    def _tick_with(self, track=None, error=None):
+        info = mock.patch.object(
+            apple_music_discord, "get_apple_music_info",
+            side_effect=error if error else None,
+            return_value=track)
+        with mock.patch.object(apple_music_discord, "executable_is_stale", return_value=False), info:
+            self.parasite.tick()
+
+    STOPPED = {"is_playing": False, "name": "", "artist": "",
+               "album": "", "duration": 0, "position": 0}
+
+    def test_idle_status_replaces_a_stale_error(self):
+        self.parasite.status = "Music unavailable: osascript timed out after 5s"
+
+        self._tick_with(track=self.STOPPED)
+
+        self.assertEqual(self.parasite.status, "Idle")
+
+    def test_transient_failure_keeps_the_previous_status(self):
+        self.parasite.status = "Sharing to Discord"
+
+        self._tick_with(error=apple_music_discord.MusicQueryError("osascript timed out after 5s"))
+
+        self.assertEqual(self.parasite.status, "Sharing to Discord")
+
+    def test_persistent_failure_surfaces_the_error(self):
+        self.parasite.status = "Sharing to Discord"
+        err = apple_music_discord.MusicQueryError("osascript timed out after 5s")
+
+        for _ in range(apple_music_discord.MUSIC_FAILURE_GRACE):
+            self._tick_with(error=err)
+
+        self.assertIn("Music unavailable", self.parasite.status)
+
+    PAUSED = {"is_playing": False, "name": "will of the heart", "artist": "Shiro SAGISU",
+              "album": "BLEACH OST 1", "duration": 228.0, "position": 148.0}
+
+    def test_paused_track_is_shown_even_without_having_seen_it_play(self):
+        """After a restart while paused, Music still reports the track."""
+        self._tick_with(track=self.PAUSED)
+
+        self.assertEqual(self.parasite.status, "Paused on Discord")
+        self.assertEqual(self.parasite.track_display,
+                         "will of the heart - Shiro SAGISU")
+
+    def test_one_success_resets_the_failure_budget(self):
+        err = apple_music_discord.MusicQueryError("boom")
+        self._tick_with(error=err)
+        self._tick_with(error=err)
+
+        self._tick_with(track=self.STOPPED)
+        self.assertEqual(self.parasite.status, "Idle")
+
+        self._tick_with(error=err)
+        self.assertEqual(self.parasite.status, "Idle")
+
+
 class MusicPayloadTests(unittest.TestCase):
     def test_parses_playing_payload(self):
         track = parse_music_payload("playing|will of the heart|Shiro SAGISU|BLEACH OST 1|228.13|148.70\n")
@@ -127,6 +192,13 @@ class MusicPayloadTests(unittest.TestCase):
         self.assertEqual(track["album"], "Best Of|Rarities")
         self.assertEqual(track["duration"], 180)
         self.assertEqual(track["position"], 30)
+
+    def test_parses_paused_payload_with_track_details(self):
+        track = parse_music_payload("paused|will of the heart|Shiro SAGISU|BLEACH OST 1|228.13|148.70\n")
+
+        self.assertFalse(track["is_playing"])
+        self.assertEqual(track["name"], "will of the heart")
+        self.assertAlmostEqual(track["position"], 148.70)
 
     def test_rejects_truncated_payload(self):
         self.assertIsNone(parse_music_payload("playing|Song|Artist\n"))

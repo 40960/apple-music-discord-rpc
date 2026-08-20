@@ -26,6 +26,9 @@ CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_TARGET = os.environ.get("DISCORD_TARGET", "auto").lower()
 
 IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))
+# Music can be slow to answer while it is app-napped. Ride out a few failed
+# polls before replacing a good status with an error the user cannot act on.
+MUSIC_FAILURE_GRACE = 3
 
 DISCORD_VARIANTS = {
     "stable": "Discord",
@@ -224,20 +227,24 @@ def choose_discord_clients(clients, target):
 def get_apple_music_info():
     script = '''
     tell application "Music"
-        if player state is playing then
-            set track_name to name of current track
-            set track_artist to artist of current track
-            set track_album to album of current track
-            set track_duration to duration of current track
-            set player_position to player position
-            set is_playing to "playing"
+        set is_playing to player state as text
+        set track_name to ""
+        set track_artist to ""
+        set track_album to ""
+        set track_duration to 0
+        set player_position to 0
+        if is_playing is "playing" or is_playing is "paused" then
+            try
+                set track_name to name of current track
+                set track_artist to artist of current track
+                set track_album to album of current track
+                set track_duration to duration of current track
+                set player_position to player position
+            on error
+                set is_playing to "stopped"
+            end try
         else
             set is_playing to "stopped"
-            set track_name to ""
-            set track_artist to ""
-            set track_album to ""
-            set track_duration to 0
-            set player_position to 0
         end if
     end tell
     return is_playing & "|" & track_name & "|" & track_artist & "|" & track_album & "|" & track_duration & "|" & player_position
@@ -376,6 +383,8 @@ class JsonParasite:
         self.running = True
         self.hidden = False
         self.last_logged_error = None
+        self.music_failures = 0
+        self.idle_cleared = False
 
     def refresh_discord_clients(self):
         self.running_clients = discover_discord_clients()
@@ -439,6 +448,7 @@ class JsonParasite:
 
         try:
             track = get_apple_music_info()
+            self.music_failures = 0
 
             if track and track['is_playing']:
                 current_key = f"{track['name']}|{track['artist']}"
@@ -452,6 +462,7 @@ class JsonParasite:
                     self.last_track = current_key
                     self.last_info = track
                     self.was_playing = True
+                self.idle_cleared = False
 
                 pos = int(track['position'])
                 dur = int(track['duration'])
@@ -483,6 +494,16 @@ class JsonParasite:
                     self.was_playing = False
                     self.paused_at = time.time()
 
+                # Music reports the track while paused too, so a restart during a
+                # pause can show it instead of pretending nothing is loaded.
+                if track and track['name'] and not self.idle_cleared:
+                    self.last_info = track
+                    self.last_position = int(track['position'])
+                    if self.session_start is None:
+                        self.session_start = time.time()
+                    if self.paused_at is None:
+                        self.paused_at = time.time()
+
                 if self.paused_at and time.time() - self.paused_at >= IDLE_TIMEOUT:
                     self.RPC.clear()
                     self.last_track = None
@@ -491,6 +512,7 @@ class JsonParasite:
                     self.paused_at = None
                     self.status = "Idle"
                     self.track_display = ""
+                    self.idle_cleared = True
                 elif self.last_info:
                     pos = self.last_position
                     dur = int(self.last_info['duration'])
@@ -508,6 +530,13 @@ class JsonParasite:
                         start=self.session_start,
                     )
                     self.status = f"Paused on {self.connected_label}"
+                    self.track_display = f"{self.last_info['name']} - {self.last_info['artist']}"
+                else:
+                    # Nothing playing and nothing remembered. Say so explicitly:
+                    # leaving the previous status in place strands whatever was
+                    # there, including an error that has long since cleared.
+                    self.status = "Idle"
+                    self.track_display = ""
 
         except (exceptions.DiscordNotFound, exceptions.InvalidPipe,
                 exceptions.PipeClosed, BrokenPipeError,
@@ -521,8 +550,10 @@ class JsonParasite:
             self.was_playing = False
             self.status = "Reconnecting..."
         except MusicQueryError as e:
-            self.status = f"Music unavailable: {e}"
+            self.music_failures += 1
             self.log_once(f"Apple Music query failed: {e}")
+            if self.music_failures >= MUSIC_FAILURE_GRACE:
+                self.status = f"Music unavailable: {e}"
         except exceptions.InvalidID:
             self.status = "Invalid Client ID"
             self.running = False
