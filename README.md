@@ -14,6 +14,7 @@ Show what you're listening to on Apple Music as your Discord status — macOS on
 - Session timer shows how long you've been listening
 - Menu bar icon with status and hide/share toggle
 - Auto-start on login via macOS LaunchAgent
+- Restarts itself when a Python upgrade breaks its Apple Events permission
 
 ## Setup
 
@@ -40,7 +41,7 @@ This will:
 - Register a macOS LaunchAgent for auto-start on login
 - Start the app immediately
 
-A 🎵 icon will appear in your menu bar.
+A music-note icon will appear in your menu bar.
 <img width="242" height="280" alt="Apple Music Discord RPC menu bar dropdown" src="assets/menu-bar.png" />
 
 ### Uninstall
@@ -67,14 +68,23 @@ Use `--no-gui` for terminal-only mode (no menu bar icon).
 | `DISCORD_TARGET` | No | `auto` | Which Discord client to use: `auto`, `stable`, `ptb`, `canary`, or `all` |
 | `IDLE_TIMEOUT` | No | `300` | Seconds before clearing status when paused |
 
+`install.sh` bakes `DISCORD_TARGET` and `IDLE_TIMEOUT` into the LaunchAgent when
+they are set in the installing shell:
+
+```bash
+DISCORD_TARGET=canary IDLE_TIMEOUT=60 ./install.sh YOUR_CLIENT_ID
+```
+
 ## Menu Bar
 
 | Icon | State |
 |------|-------|
-| 🎵 | Sharing / Idle |
-| ⏸ | Paused |
-| 🙈 | Hidden (status not shared) |
-| ⚠️ | Error / Reconnecting |
+| `music.note` | Sharing / Idle |
+| `pause.fill` | Paused |
+| `eye.slash.fill` | Hidden (status not shared) |
+| `exclamationmark.triangle.fill` | Error / Reconnecting |
+
+The icons are SF Symbols, so they follow the menu bar's light/dark appearance.
 
 Click the icon to see current track, status, and toggle visibility.
 
@@ -99,6 +109,49 @@ so it can rebuild the detected client list.
 ## How It Works
 
 Uses AppleScript to poll Apple Music every 5 seconds, then pushes the track info to Discord via Rich Presence ([pypresence](https://github.com/qwertyquerty/pypresence)). Auto-start is handled by a standard macOS [LaunchAgent](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) plist.
+
+### Surviving a Python upgrade
+
+macOS resolves a process's executable path every time it checks an Apple Events
+permission. Homebrew deletes the old `Cellar` directory when it upgrades
+`python@3.12`, and a process started before the upgrade keeps executing the now
+deleted file. macOS can no longer resolve its path, so it cannot build a TCC
+attribution chain and Music rejects every Apple Event with
+`errAEEventNotPermitted`:
+
+```
+tccd:  proc_pidpath_audittoken() failed from PID[…]: (#2) No such file or directory
+tccd:  ERROR: failed to construct a process for the responsible audit token
+Music: No designated requirement for process […], so denying this event
+```
+
+Nothing crashes — `osascript` just exits non-zero, so the app looks connected
+while reporting no track at all.
+
+Each tick calls `proc_pidpath` on its own pid, the same lookup TCC performs. If
+the executable is gone the app logs it, exits non-zero, and the LaunchAgent's
+`KeepAlive` respawns it against the current interpreter. The replacement process
+has a valid path, so the condition cannot repeat and there is no restart loop.
+
+## Troubleshooting
+
+Logs are at `~/Library/Logs/apple-music-discord-rpc.log`.
+
+| Menu bar status | Meaning |
+|-----------------|---------|
+| `Waiting for Discord...` | Discord is not running, or no `discord-ipc-*` socket was found |
+| `Music unavailable: …` | `osascript` failed; the message is the raw AppleScript error |
+| `Restarting...` | The interpreter was replaced on disk; launchd is respawning the app |
+| `Invalid Client ID` | `DISCORD_CLIENT_ID` is not a real Discord application ID |
+
+If `Music unavailable:` mentions **Not authorized to send Apple events**, grant
+the permission under System Settings → Privacy & Security → Automation.
+
+## Development
+
+```bash
+./venv/bin/python3 -m unittest discover -p 'test_*.py' -v
+```
 
 ## Requirements
 
