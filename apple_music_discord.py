@@ -29,6 +29,11 @@ IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))
 # Music can be slow to answer while it is app-napped. Ride out a few failed
 # polls before replacing a good status with an error the user cannot act on.
 MUSIC_FAILURE_GRACE = 3
+# Mapping a socket to the app that owns it costs two lsof spawns per socket, and
+# the answer only changes when a Discord client starts or stops. Poll the cheap
+# directory listing every tick and pay for lsof only when it can tell us
+# something new.
+DISCOVERY_TTL = 30
 
 DISCORD_VARIANTS = {
     "stable": "Discord",
@@ -175,23 +180,26 @@ def owner_paths_for_socket(socket_path):
     return owner_paths
 
 
-def discover_discord_clients():
-    tempdir = tempfile.gettempdir()
+def discord_socket_paths():
+    """Sorted discord-ipc-* socket paths. A directory listing, no lsof."""
     try:
-        entries = list(os.scandir(tempdir))
+        entries = os.scandir(tempfile.gettempdir())
     except OSError:
         return []
+    return sorted(entry.path for entry in entries
+                  if entry.name.startswith("discord-ipc-"))
 
+
+def resolve_discord_clients(socket_paths):
+    """Map each socket to the Discord variant owning it. This is the costly part."""
     clients = {}
-    for entry in entries:
-        if not entry.name.startswith("discord-ipc-"):
-            continue
-        pipe = extract_pipe_number(entry.path)
+    for path in socket_paths:
+        pipe = extract_pipe_number(path)
         if pipe is None:
             continue
 
         variant = None
-        for owner_path in owner_paths_for_socket(entry.path):
+        for owner_path in owner_paths_for_socket(path):
             variant = classify_discord_app(owner_path)
             if variant:
                 break
@@ -201,11 +209,39 @@ def discover_discord_clients():
         clients[variant] = DiscordClient(
             variant=variant,
             name=DISCORD_VARIANTS[variant],
-            path=entry.path,
+            path=path,
             pipe=pipe,
         )
 
     return [clients[variant] for variant in TARGET_ORDER if variant in clients]
+
+
+_discovery_cache = {"sockets": None, "clients": [], "at": 0.0}
+
+
+def reset_discovery_cache():
+    _discovery_cache.update(sockets=None, clients=[], at=0.0)
+
+
+def discovery_is_stale(sockets, cache, now):
+    """Whether the owner lookup must run again, rather than reusing the cache."""
+    if cache["sockets"] is None:
+        return True
+    if cache["sockets"] != sockets:
+        return True
+    return now - cache["at"] >= DISCOVERY_TTL
+
+
+def discover_discord_clients(force=False):
+    sockets = discord_socket_paths()
+    now = time.time()
+
+    if not force and not discovery_is_stale(sockets, _discovery_cache, now):
+        return _discovery_cache["clients"]
+
+    clients = resolve_discord_clients(sockets)
+    _discovery_cache.update(sockets=sockets, clients=clients, at=now)
+    return clients
 
 
 def choose_discord_clients(clients, target):
